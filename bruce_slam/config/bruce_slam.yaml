@@ -1,0 +1,51 @@
+state_estimation_node:
+  ros__parameters:
+    method: "eskf" # "eskf" or "complementary"
+    odom_frame: "odom"
+    base_frame: "base_link"
+    imu_topic: "/imu/data_raw"
+    dvl_topic: "/dvl/velocity"
+    depth_topic: "/altitude/depth"
+    stereo_topic: "/stereo/pose"
+    lever_arm_dvl: [0.1, 0.0, -0.2]
+    lever_arm_depth: [-0.2, 0.0, 0.1]
+    lever_arm_imu: [0.0, 0.0, 0.0]
+    use_tf_extrinsics: true
+    imu_max_gap: 0.5
+    sensor_max_age: 0.3
+    eskf.enable_zupt: false
+    eskf.sigma_dvl: 0.01
+    eskf.gate_p_val: 0.99
+
+pointcloud_preprocessing_node:
+  ros__parameters:
+    input_topic: "/sonar_3d/points"
+    output_topic: "/sonar_3d/points_filtered"
+    base_frame: "base_link"
+    sonar_frame: "sonar_link"
+    min_range: 0.3
+    max_range: 15.0
+    fov_azimuth_deg: 90.0
+    fov_elevation_deg: 90.0
+    voxel_size: 0.15
+    min_neighbors: 4
+    outlier_radius: 0.4
+    sonar_offset_xyz: [0.4, 0.0, -0.1]
+
+slam_node:
+  ros__parameters:
+    map_frame: "map"
+    odom_frame: "odom"
+    base_frame: "base_link"
+    keyframe_min_dt: 0.5
+    keyframe_translation: 0.5
+    keyframe_rotation_deg: 15.0
+    enable_ssm: true
+    ssm_min_fitness: 0.6
+    ssm_max_translation: 1.0
+    icp_backend: "numpy" # "numpy" or "open3d"
+    enable_loop_closure: true
+    loop_search_radius: 4.0
+    loop_min_index_gap: 8
+    loop_min_fitness: 0.75
+    map_publish_period: 2.0

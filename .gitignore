@@ -2,3 +2,9 @@
 *.pyc
 bruce_slam/src/bruce_slam/__pycache__/
 bruce_slam/utils/__pycache__/
+**/test/
+**/urdf/
+**/resource/
+**/review/
+**/__pycache__/
+/.pytest_cache/
