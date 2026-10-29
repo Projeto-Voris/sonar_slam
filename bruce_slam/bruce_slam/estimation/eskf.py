@@ -34,6 +34,13 @@ class EskfConfig:
     static_velocity_threshold: float = 0.05  # m/s
     enable_gravity_leveling: bool = True
 
+    # Optional stationarity aiding requires fresh, accepted bottom-track DVL.
+    enable_zupt: bool = False
+    sigma_zupt: float = 0.02
+    sigma_zero_gyro: float = 0.005
+    zupt_min_duration: float = 0.5
+    zupt_dvl_max_age: float = 0.3
+
     # Outlier / re-alignment thresholds
     dvl_max_velocity: float = 3.0            # m/s
     vis_realign_after_n_rejects: int = 15
@@ -90,6 +97,9 @@ class ESKF:
 
         # Last IMU timestamp
         self.last_imu_time = None
+        self.dvl_age = float("inf")
+        self.dvl_stationary = False
+        self.stationary_duration = 0.0
 
     def initialize_attitude(self, accel_samples: np.ndarray):
         """Level initial roll/pitch from static accelerometer readings."""
@@ -98,10 +108,10 @@ class ESKF:
         if norm_a < 1e-4:
             return
         # Accel measures upward reaction to gravity: a ~= -R^T * g_world
-        # So in body frame: a_norm ~= [sin(pitch), -sin(roll)*cos(pitch), -cos(roll)*cos(pitch)]
+        # So in body frame: a_norm ~= [-sin(pitch), sin(roll)*cos(pitch), cos(roll)*cos(pitch)]
         an = mean_accel / norm_a
-        pitch = np.arctan2(an[0], np.sqrt(an[1]**2 + an[2]**2))
-        roll = np.arctan2(-an[1], -an[2])
+        pitch = np.arctan2(-an[0], np.sqrt(an[1]**2 + an[2]**2))
+        roll = np.arctan2(an[1], an[2])
         yaw = 0.0
 
         cr, sr = np.cos(roll), np.sin(roll)
@@ -162,9 +172,27 @@ class ESKF:
         self.P = Phi @ self.P @ Phi.T + Qd
         self.P = 0.5 * (self.P + self.P.T)  # Keep symmetric
 
+        self.dvl_age += dt
+        stationary = (self.dvl_stationary and
+                      self.dvl_age <= self.cfg.zupt_dvl_max_age and
+                      np.linalg.norm(gyro - self.bg) < self.cfg.static_gyro_threshold and
+                      abs(np.linalg.norm(accel - self.ba) - self.cfg.gravity) < self.cfg.static_accel_threshold)
+        self.stationary_duration = self.stationary_duration + dt if stationary else 0.0
+        if self.cfg.enable_zupt and stationary and self.stationary_duration >= self.cfg.zupt_min_duration:
+            self.correct_zero_motion(gyro)
+
         # Quasi-static gravity leveling when stationary
         if self.cfg.enable_gravity_leveling:
             self._maybe_gravity_leveling(gyro, accel)
+
+    def correct_zero_motion(self, gyro: np.ndarray) -> bool:
+        """Fuse zero world velocity and zero angular rate; never hard-reset states."""
+        H = np.zeros((6, 15))
+        H[:3, 3:6] = np.eye(3)
+        H[3:, 9:12] = np.eye(3)
+        residual = np.concatenate((-self.v, gyro - self.bg))
+        noise = np.diag([self.cfg.sigma_zupt**2] * 3 + [self.cfg.sigma_zero_gyro**2] * 3)
+        return self._apply_correction(residual, H, noise, dof=6)
 
     def _maybe_gravity_leveling(self, gyro: np.ndarray, accel: np.ndarray):
         """Static gravity aiding bounds roll/pitch drift when vehicle is still."""
@@ -192,6 +220,9 @@ class ESKF:
         """DVL body velocity correction with lever arm compensation.
         v_dvl = R_bd^T (R^T v + w x r_bd)
         """
+        self.dvl_stationary = False
+        if not np.all(np.isfinite(v_dvl_meas)):
+            return False
         if np.linalg.norm(v_dvl_meas) > self.cfg.dvl_max_velocity:
             return False
 
@@ -215,7 +246,11 @@ class ESKF:
         else:
             R_cov = cov.copy()
 
-        return self._apply_correction(residual, H, R_cov, dof=3)
+        accepted = self._apply_correction(residual, H, R_cov, dof=3)
+        if accepted:
+            self.dvl_age = 0.0
+            self.dvl_stationary = np.linalg.norm(R_bd @ v_dvl_meas - np.cross(w, r_bd)) < self.cfg.static_velocity_threshold
+        return accepted
 
     def correct_depth(self, depth_z_up: float, r_depth: np.ndarray, sigma: float = None) -> bool:
         """Depth / altitude correction with lever arm compensation.
@@ -293,6 +328,10 @@ class ESKF:
     def _apply_correction(self, residual: np.ndarray, H: np.ndarray,
                           R_cov: np.ndarray, dof: int) -> bool:
         """Numerically robust Joseph-form Kalman update with Chi-squared gating."""
+        if not (np.all(np.isfinite(residual)) and np.all(np.isfinite(R_cov))):
+            return False
+        if np.min(np.linalg.eigvalsh(R_cov)) <= 0:
+            return False
         S = H @ self.P @ H.T + R_cov
         try:
             S_inv = np.linalg.inv(S)

@@ -8,7 +8,7 @@ from nav_msgs.msg import Odometry, Path
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from tf2_ros import TransformBroadcaster
 
-from ..geometry import make_se3, quat_to_rot, rot_to_quat
+from ..geometry import make_se3, quat_to_rot, rot_to_quat, interpolate_pose
 from ..slam.pose_graph import PoseGraphSLAM, SlamConfig
 from ..utils.conversions import (
     pointcloud2_to_numpy, numpy_to_pointcloud2,
@@ -44,6 +44,7 @@ class SlamNode(Node):
         self.declare_parameter('loop_min_fitness', 0.75)
 
         self.declare_parameter('map_publish_period', 2.0)
+        self.declare_parameter('odom_interpolation_max_gap', 0.2)
 
         self.map_frame = self.get_parameter('map_frame').value
         self.odom_frame = self.get_parameter('odom_frame').value
@@ -133,14 +134,11 @@ class SlamNode(Node):
         if len(pts) < 15:
             return
 
-        # Find closest odometry pose to this timestamp
-        if len(self.odom_buffer) == 0:
+        T_odom_base = interpolate_pose(
+            self.odom_buffer, t, self.get_parameter('odom_interpolation_max_gap').value
+        )
+        if T_odom_base is None:
             return
-
-        closest_odom = min(self.odom_buffer, key=lambda item: abs(item[0] - t))
-        if abs(closest_odom[0] - t) > 0.5:
-            return
-        T_odom_base = closest_odom[1]
 
         # Check keyframe criteria
         if self.slam.should_create_keyframe(t, T_odom_base):

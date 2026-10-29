@@ -1,0 +1,14 @@
+# Supply alongside bruce_slam.yaml. Surface pressure must match the recording.
+state_estimation_node:
+  ros__parameters:
+    imu_topic: /mavros/imu/data
+    dvl_topic: /waterlinked_dvl_driver/velocity_report
+    dvl_message_type: marine_acoustic_msgs/msg/Dvl
+    depth_topic: /mavros/imu/static_pressure
+    depth_message_type: sensor_msgs/msg/FluidPressure
+    use_tf_extrinsics: true
+    pressure_surface_pa: 101325.0
+    water_density: 1025.0
+    eskf.sigma_dvl: 0.05
+    eskf.gate_p_val: 0.999
+    eskf.enable_zupt: false

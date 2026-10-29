@@ -115,22 +115,27 @@ def extract_depth(msg) -> Tuple[float, Optional[float]]:
     if hasattr(msg, 'pose') and hasattr(msg.pose, 'pose'):
         # PoseWithCovarianceStamped: position.z is depth positive down
         depth_down = msg.pose.pose.position.z
-        cov = msg.pose.covariance[14] if hasattr(msg.pose, 'covariance') else 0.04
-        sigma = np.sqrt(cov) if cov > 0 else 0.02
+        cov = msg.pose.covariance[14] if hasattr(msg.pose, 'covariance') else 0.0
+        sigma = np.sqrt(cov) if cov > 0 else None
         return -depth_down, sigma
     elif hasattr(msg, 'pose'):
         # PoseStamped
         depth_down = msg.pose.position.z
-        return -depth_down, 0.02
+        return -depth_down, None
     elif hasattr(msg, 'data'):
         # std_msgs/Float64
-        return -float(msg.data), 0.02
+        return -float(msg.data), None
     else:
-        return 0.0, 0.02
+        raise ValueError("Unsupported depth message")
 
 
 def extract_twist(msg) -> Tuple[np.ndarray, Optional[np.ndarray]]:
     """Extract (velocity_3d, 3x3 covariance) from DVL message."""
+    if hasattr(msg, 'velocity'):
+        v = msg.velocity
+        cov = np.asarray(msg.velocity_covar, dtype=float).reshape(3, 3)
+        valid = np.all(np.isfinite(cov)) and np.allclose(cov, cov.T) and np.min(np.linalg.eigvalsh(cov)) > 0
+        return np.array([v.x, v.y, v.z], dtype=float), cov if valid else None
     if hasattr(msg, 'twist') and hasattr(msg.twist, 'twist'):
         # TwistWithCovarianceStamped
         tw = msg.twist.twist.linear

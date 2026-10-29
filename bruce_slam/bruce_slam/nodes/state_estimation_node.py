@@ -2,13 +2,15 @@
 import rclpy
 from rclpy.node import Node
 import numpy as np
+from dataclasses import fields
+from rosidl_runtime_py.utilities import get_message
 
 from sensor_msgs.msg import Imu
 from geometry_msgs.msg import TwistWithCovarianceStamped, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
-from tf2_ros import TransformBroadcaster
+from tf2_ros import TransformBroadcaster, Buffer, TransformListener, TransformException
 
-from ..geometry import make_se3
+from ..geometry import make_se3, quat_to_rot
 from ..estimation.eskf import ESKF, EskfConfig
 from ..estimation.complementary import ComplementaryFilter, ComplementaryConfig
 from ..utils.conversions import (
@@ -48,12 +50,31 @@ class StateEstimationNode(Node):
         self.r_depth = np.array(self.get_parameter('lever_arm_depth').value, dtype=np.float64)
         self.r_imu = np.array(self.get_parameter('lever_arm_imu').value, dtype=np.float64)
 
+        for config_type, prefix in [(EskfConfig, 'eskf'), (ComplementaryConfig, 'complementary')]:
+            defaults = config_type()
+            for field in fields(defaults):
+                self.declare_parameter(f'{prefix}.{field.name}', getattr(defaults, field.name))
+        for name, default in {
+            'dvl_message_type': 'geometry_msgs/msg/TwistWithCovarianceStamped',
+            'depth_message_type': 'geometry_msgs/msg/PoseWithCovarianceStamped',
+            'dvl_frame': '', 'depth_frame': '', 'imu_frame': '', 'use_tf_extrinsics': True,
+            'pressure_surface_pa': 101325.0, 'water_density': 1025.0,
+            'imu_max_gap': 0.5, 'sensor_max_age': 0.3,
+            'initialization_samples': 20, 'initialization_gyro_threshold': 0.03,
+            'initialization_accel_threshold': 0.2,
+        }.items():
+            self.declare_parameter(name, default)
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.depth_initialized = False
+        self.last_dvl_stamp = None
+
         # Filters
         if self.method == 'eskf':
-            self.filter = ESKF(EskfConfig())
+            self.filter = ESKF(EskfConfig(**{f.name: self.get_parameter(f'eskf.{f.name}').value for f in fields(EskfConfig)}))
             self.get_logger().info('Initialized 15-state ESKF state estimator.')
         else:
-            self.filter = ComplementaryFilter(ComplementaryConfig())
+            self.filter = ComplementaryFilter(ComplementaryConfig(**{f.name: self.get_parameter(f'complementary.{f.name}').value for f in fields(ComplementaryConfig)}))
             self.get_logger().info('Initialized Complementary filter state estimator.')
 
         # Initialization buffer
@@ -73,8 +94,8 @@ class StateEstimationNode(Node):
         stereo_topic = self.get_parameter('stereo_topic').value
 
         self.sub_imu = self.create_subscription(Imu, imu_topic, self._on_imu, sensor_qos)
-        self.sub_dvl = self.create_subscription(TwistWithCovarianceStamped, dvl_topic, self._on_dvl, sensor_qos)
-        self.sub_depth = self.create_subscription(PoseWithCovarianceStamped, depth_topic, self._on_depth, sensor_qos)
+        self.sub_dvl = self.create_subscription(get_message(self.get_parameter('dvl_message_type').value), dvl_topic, self._on_dvl, sensor_qos)
+        self.sub_depth = self.create_subscription(get_message(self.get_parameter('depth_message_type').value), depth_topic, self._on_depth, sensor_qos)
         self.sub_stereo = self.create_subscription(PoseWithCovarianceStamped, stereo_topic, self._on_stereo, sensor_qos)
 
         self.get_logger().info('state_estimation_node is ready and listening for sensors.')
@@ -82,14 +103,31 @@ class StateEstimationNode(Node):
     def _on_imu(self, msg: Imu):
         gyro = np.array([msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z])
         accel = np.array([msg.linear_acceleration.x, msg.linear_acceleration.y, msg.linear_acceleration.z])
+        if not (np.all(np.isfinite(gyro)) and np.all(np.isfinite(accel))):
+            return
+        stamp_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        if self.last_imu_stamp is not None and stamp_sec <= self.last_imu_stamp:
+            return
+        self.latest_gyro = gyro
+
+        extrinsics = self._extrinsics(msg, 'imu_frame', self.r_imu)
+        if extrinsics is None:
+            return
+        R_bi, _ = extrinsics
+        gyro, accel = R_bi @ gyro, R_bi @ accel
         self.latest_gyro = gyro
 
         # 1. Level roll/pitch from initial static gravity readings (~20 samples)
         if not self.is_initialized:
+            if (np.linalg.norm(gyro) >= self.get_parameter('initialization_gyro_threshold').value or
+                    abs(np.linalg.norm(accel) - self.filter.cfg.gravity) >= self.get_parameter('initialization_accel_threshold').value):
+                self.accel_init_samples.clear()
+                return
             self.accel_init_samples.append(accel)
-            if len(self.accel_init_samples) >= 20:
+            if len(self.accel_init_samples) >= self.get_parameter('initialization_samples').value:
                 self.filter.initialize_attitude(np.array(self.accel_init_samples))
                 self.is_initialized = True
+                self.last_imu_stamp = stamp_sec
                 self.get_logger().info('Initial attitude leveled successfully.')
             return
 
@@ -102,8 +140,12 @@ class StateEstimationNode(Node):
         dt = stamp_sec - self.last_imu_stamp
         self.last_imu_stamp = stamp_sec
 
-        if dt <= 0.0 or dt > 0.2:
-            dt = 0.01
+        if dt > min(0.5, self.get_parameter('imu_max_gap').value):
+            if self.method == 'eskf':
+                self.filter.dvl_stationary = False
+                self.filter.stationary_duration = 0.0
+            self.get_logger().warning('IMU gap exceeds limit; skipping propagation.')
+            return
 
         # Predict
         if self.method == 'eskf':
@@ -114,28 +156,79 @@ class StateEstimationNode(Node):
         # Broadcast TF and publish odometry
         self._publish_state(msg.header.stamp)
 
+    def _extrinsics(self, msg, frame_parameter, fallback):
+        frame = self.get_parameter(frame_parameter).value or getattr(msg.header, 'frame_id', '')
+        if frame == self.base_frame:
+            return np.eye(3), np.zeros(3)
+        if not self.get_parameter('use_tf_extrinsics').value or not frame:
+            return np.eye(3), fallback
+        try:
+            tf = self.tf_buffer.lookup_transform(self.base_frame, frame, rclpy.time.Time.from_msg(msg.header.stamp))
+        except TransformException:
+            self.get_logger().warning(f'Waiting for extrinsics from {frame} to {self.base_frame}.', throttle_duration_sec=5.0)
+            return None
+        r, t = tf.transform.rotation, tf.transform.translation
+        return quat_to_rot(np.array([r.w, r.x, r.y, r.z])), np.array([t.x, t.y, t.z])
+
+    def _sensor_time(self, msg):
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        if self.last_imu_stamp is None or abs(stamp - self.last_imu_stamp) > self.get_parameter('sensor_max_age').value:
+            return None
+        return stamp
+
     def _on_dvl(self, msg: TwistWithCovarianceStamped):
         if not self.is_initialized:
             return
+        stamp = self._sensor_time(msg)
+        if stamp is None or (self.last_dvl_stamp is not None and stamp <= self.last_dvl_stamp):
+            return
+        if hasattr(msg, 'velocity_mode') and msg.velocity_mode != msg.DVL_MODE_BOTTOM:
+            if self.method == 'eskf':
+                self.filter.dvl_stationary = False
+            return
+        extrinsics = self._extrinsics(msg, 'dvl_frame', self.r_dvl)
+        if extrinsics is None:
+            return
+        R_bd, r_dvl = extrinsics
         vel, cov = extract_twist(msg)
-        R_bd = np.eye(3)  # DVL aligned with base_link axes
 
         if self.method == 'eskf':
-            self.filter.correct_dvl(vel, R_bd, self.r_dvl, cov=cov, gyro=self.latest_gyro)
+            self.filter.correct_dvl(vel, R_bd, r_dvl, cov=cov, gyro=self.latest_gyro)
         else:
-            self.filter.update_dvl(vel, R_bd, dt=0.1)
+            dt = stamp - self.last_dvl_stamp if self.last_dvl_stamp is not None else 0.0
+            vel = vel - R_bd.T @ np.cross(self.latest_gyro - self.filter.bg, r_dvl)
+            self.filter.update_dvl(vel, R_bd, dt=dt)
+        self.last_dvl_stamp = stamp
 
     def _on_depth(self, msg: PoseWithCovarianceStamped):
         if not self.is_initialized:
             return
-        depth_z_up, sigma = extract_depth(msg)
-        if self.method == 'eskf':
-            self.filter.correct_depth(depth_z_up, self.r_depth, sigma=sigma)
+        if self._sensor_time(msg) is None:
+            return
+        extrinsics = self._extrinsics(msg, 'depth_frame', self.r_depth)
+        if extrinsics is None:
+            return
+        _, r_depth = extrinsics
+        if hasattr(msg, 'fluid_pressure'):
+            scale = self.get_parameter('water_density').value * self.filter.cfg.gravity
+            depth_z_up = -(msg.fluid_pressure - self.get_parameter('pressure_surface_pa').value) / scale
+            sigma = np.sqrt(msg.variance) / scale if msg.variance > 0 else None
         else:
-            self.filter.update_depth(depth_z_up, self.r_depth)
+            depth_z_up, sigma = extract_depth(msg)
+        if not np.isfinite(depth_z_up):
+            return
+        if not self.depth_initialized:
+            self.filter.p[2] = depth_z_up - (self.filter.R @ r_depth)[2]
+            self.depth_initialized = True
+        if self.method == 'eskf':
+            self.filter.correct_depth(depth_z_up, r_depth, sigma=sigma)
+        else:
+            self.filter.update_depth(depth_z_up, r_depth)
 
     def _on_stereo(self, msg: PoseWithCovarianceStamped):
         if not self.is_initialized or self.method != 'eskf':
+            return
+        if self._sensor_time(msg) is None:
             return
         pos, yaw, pos_cov, yaw_cov = extract_pose_and_yaw(msg)
         self.filter.correct_visual_pose(pos, yaw, pos_cov, yaw_cov)

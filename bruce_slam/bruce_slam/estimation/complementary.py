@@ -28,12 +28,15 @@ class ComplementaryFilter:
 
     def initialize_attitude(self, accel: np.ndarray):
         """Initial leveling from static gravity reading."""
+        accel = np.asarray(accel, dtype=float)
+        if accel.ndim == 2:
+            accel = np.mean(accel, axis=0)
         norm_a = np.linalg.norm(accel)
         if norm_a < 1e-4:
             return
         an = accel / norm_a
-        pitch = np.arctan2(an[0], np.sqrt(an[1]**2 + an[2]**2))
-        roll = np.arctan2(-an[1], -an[2])
+        pitch = np.arctan2(-an[0], np.sqrt(an[1]**2 + an[2]**2))
+        roll = np.arctan2(an[1], an[2])
 
         cr, sr = np.cos(roll), np.sin(roll)
         cp, sp = np.cos(pitch), np.sin(pitch)

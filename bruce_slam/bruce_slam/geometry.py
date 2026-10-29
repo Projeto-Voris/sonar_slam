@@ -156,3 +156,22 @@ def inv_se3(T: np.ndarray) -> np.ndarray:
     T_inv[:3, :3] = R.T
     T_inv[:3, 3] = -R.T @ t
     return T_inv
+
+
+def interpolate_pose(samples, timestamp, max_gap=0.2):
+    """Interpolate bracketing odometry; reject extrapolation and large gaps."""
+    ordered = sorted(samples, key=lambda sample: sample[0])
+    for sample in ordered:
+        if sample[0] == timestamp:
+            return sample[1].copy()
+    for left, right in zip(ordered, ordered[1:]):
+        t0, T0 = left[:2]
+        t1, T1 = right[:2]
+        if t0 < timestamp < t1:
+            if t1 - t0 > max_gap:
+                return None
+            fraction = (timestamp - t0) / (t1 - t0)
+            R = T0[:3, :3] @ exp_so3(fraction * log_so3(T0[:3, :3].T @ T1[:3, :3]))
+            p = (1 - fraction) * T0[:3, 3] + fraction * T1[:3, 3]
+            return make_se3(R, p)
+    return None

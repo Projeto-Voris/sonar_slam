@@ -10,6 +10,12 @@ state_estimation_node:
     lever_arm_dvl: [0.1, 0.0, -0.2]
     lever_arm_depth: [-0.2, 0.0, 0.1]
     lever_arm_imu: [0.0, 0.0, 0.0]
+    use_tf_extrinsics: true
+    imu_max_gap: 0.5
+    sensor_max_age: 0.3
+    eskf.enable_zupt: false
+    eskf.sigma_dvl: 0.01
+    eskf.gate_p_val: 0.99
 
 pointcloud_preprocessing_node:
   ros__parameters:
