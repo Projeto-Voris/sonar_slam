@@ -48,6 +48,9 @@ def generate_launch_description():
         package='bruce_slam',
         executable='state_estimation_node',
         output='screen',
+        remappings=[('/imu/data_raw', '/mavros/imu/data_raw'),
+                    ('/dvl/velocity', '/mavros/local_position/velocity_body_cov'),
+                    ('/altitude/depth', '/mavros/local_position/pose_cov'),],
         parameters=[config_file, {'method': method}]
     )
 
@@ -56,6 +59,8 @@ def generate_launch_description():
         package='bruce_slam',
         executable='pointcloud_preprocessing_node',
         output='screen',
+        remappings=[('/sonar_3d/points', '/Passive/sonar3d/pointcloud'),
+                ],
         parameters=[config_file]
     )
 
