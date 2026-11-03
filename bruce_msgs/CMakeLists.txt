@@ -1,54 +1,28 @@
-cmake_minimum_required(VERSION 2.8.3)
+
+cmake_minimum_required(VERSION 3.8)
 project(bruce_msgs)
-
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
-
-find_package(catkin REQUIRED COMPONENTS
-  geometry_msgs
-  nav_msgs
-  message_generation
-  sensor_msgs
-  #sonar_oculus
+ 
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+ 
+find_package(ament_cmake REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+# find_package(sonar_oculus REQUIRED)
+ 
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/ISAM2Update.msg"
+  # "msg/KeyframeImage.msg"   # renomeado: ROS 2 exige CamelCase
+  # "msg/PoseHistory.msg"     # renomeado: ROS 2 exige CamelCase
+  "srv/QueryExplorationPath.srv"
+  "srv/PredictSLAMUpdate.srv"
+  "srv/GetOccupancyMap.srv"
+  DEPENDENCIES geometry_msgs nav_msgs sensor_msgs
 )
-
-add_message_files(
-   FILES
-   ISAM2Update.msg
-   #keyframe_image.msg
-   #posehistory.msg
-)
-
-add_service_files(
-  FILES
-  QueryExplorationPath.srv
-  PredictSLAMUpdate.srv
-  GetOccupancyMap.srv
-)
-
-generate_messages(
-   DEPENDENCIES
-   geometry_msgs
-   nav_msgs
-   sensor_msgs
-   #sonar_oculus
-)
-
-#find_package(GTSAM REQUIRED)
-#set(GTSAM_LIBRARIES gtsam)
-
-#include_directories(
-#  include
-#  ${GTSAM_INCLUDE_DIR}
-#  ${catkin_INCLUDE_DIRS}
-#)
-
-catkin_package(
-   INCLUDE_DIRS include
-   LIBRARIES conversions
-   CATKIN_DEPENDS message_runtime geometry_msgs nav_msgs sensor_msgs
-   #DEPENDS GTSAM
-)
-
-#add_library(conversions src/bruce_msgs/conversions.cpp)
-#add_dependencies(conversions bruce_msgs_generate_messages_cpp)
-#target_link_libraries(conversions  ${catkin_LIBRARIES})
+ 
+ament_export_dependencies(rosidl_default_runtime)
+ament_package()
+ 
